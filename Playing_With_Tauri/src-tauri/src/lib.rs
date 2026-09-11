@@ -23,10 +23,20 @@ struct CharRect {
     h: i32,
 }
 type SharedRect = Arc<Mutex<Option<CharRect>>>;
+type SharedSnapshot = Arc<Mutex<Option<DesktopSnapshot>>>;
 
 #[tauri::command]
 fn update_character_rect(x: i32, y: i32, w: i32, h: i32, rect_state: tauri::State<SharedRect>) {
     *rect_state.lock().unwrap() = Some(CharRect { x, y, w, h });
+}
+
+#[tauri::command]
+fn get_desktop_snapshot(state: tauri::State<SharedSnapshot>) -> Option<DesktopSnapshot> {
+    let cache = state.lock().unwrap_or_else(|e| e.into_inner());
+    if cache.is_none() {
+        eprintln!("[desktop-pet] get_desktop_snapshot: cache not ready yet");
+    }
+    cache.clone()
 }
 
 #[tauri::command]
@@ -55,12 +65,14 @@ fn show_context_menu(app: tauri::AppHandle, pause_state: tauri::State<PauseState
 pub fn run() {
     let pause_state: PauseState = Arc::new(Mutex::new(false));
     let shared_rect: SharedRect = Arc::new(Mutex::new(None));
+    let shared_snapshot: SharedSnapshot = Arc::new(Mutex::new(None));
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(pause_state)
         .manage(shared_rect.clone())
-        .invoke_handler(tauri::generate_handler![show_context_menu, update_character_rect])
+        .manage(shared_snapshot.clone())
+        .invoke_handler(tauri::generate_handler![show_context_menu, update_character_rect, get_desktop_snapshot])
         .setup(|app| {
             let window = app.get_webview_window("main").expect("no main window");
             
@@ -101,18 +113,20 @@ pub fn run() {
             let own_hwnds: Vec<isize> = Vec::new();
             
             let app_handle = app.handle().clone();
-            let prev_snapshot: Arc<Mutex<Option<DesktopSnapshot>>> = Arc::new(Mutex::new(None));
+            let shared_snapshot = app.state::<SharedSnapshot>().inner().clone();
             
             std::thread::spawn(move || {
+                eprintln!("[desktop-pet] snapshot poller started");
                 loop {
                     let snapshot = enumerate_windows(&own_hwnds);
                     
                     let should_emit = {
-                        let mut prev = prev_snapshot.lock().unwrap();
-                        let changed = prev.as_ref() != Some(&snapshot);
-                        if changed {
-                            *prev = Some(snapshot.clone());
-                        }
+                        // Cache the latest snapshot every iteration, BEFORE the change
+                        // check and emit, so get_desktop_snapshot() can never return
+                        // data older than a desktop-snapshot event already sent to the UI.
+                        let mut cache = shared_snapshot.lock().unwrap();
+                        let changed = cache.as_ref() != Some(&snapshot);
+                        *cache = Some(snapshot.clone());
                         changed
                     };
                     

@@ -94,6 +94,15 @@ async function init() {
       platforms = newPlatforms;
       refreshPlatformReference(character, platforms);
     });
+
+    const initialSnapshot = await invoke<DesktopSnapshot | null>('get_desktop_snapshot');
+    if (initialSnapshot) {
+      platforms = buildPlatforms(initialSnapshot);
+      refreshPlatformReference(character, platforms);
+      console.log(`[desktop-pet] seeded ${platforms.length} platform(s) from cached snapshot`);
+    } else {
+      console.warn('[desktop-pet] cached snapshot not ready yet; waiting for desktop-snapshot events');
+    }
     
     await listen<boolean>('pet-visibility', (event) => {
       petVisible = event.payload;
