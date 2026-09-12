@@ -46,10 +46,10 @@ fn show_context_menu(app: tauri::AppHandle, pause_state: tauri::State<PauseState
 
     let pause_item = MenuItem::with_id(&app, "pause", pause_label, true, None::<&str>)
         .map_err(|e| e.to_string())?;
-    let close_item = MenuItem::with_id(&app, "close", "✕  Close", true, None::<&str>)
+    let minimize_item = MenuItem::with_id(&app, "minimize", "—  Minimize", true, None::<&str>)
         .map_err(|e| e.to_string())?;
 
-    let menu = Menu::with_items(&app, &[&pause_item, &close_item])
+    let menu = Menu::with_items(&app, &[&pause_item, &minimize_item])
         .map_err(|e| e.to_string())?;
 
     if let Some(main_win) = app.get_webview_window("main") {
@@ -59,6 +59,106 @@ fn show_context_menu(app: tauri::AppHandle, pause_state: tauri::State<PauseState
     }
 
     Ok(())
+}
+
+const CHAT_SYSTEM_PROMPT: &str = "You are a direct, efficient assistant. Your defining trait is respecting the user's time.
+
+Response style:
+- Default to the shortest response that fully answers the question. One sentence beats three if it's enough.
+- No filler openers (\"Great question!\", \"I'd be happy to help!\", \"Certainly!\"). Start with the actual answer.
+- No restating the user's question back to them before answering.
+- Use lists/steps only when the content is genuinely sequential or enumerable — otherwise, plain sentences.
+- If a question is ambiguous, make a reasonable assumption and answer it rather than asking a clarifying question first, unless answering would clearly be wrong without more info.
+
+Emoji policy (strict):
+- Do NOT use an emoji in every response. Emojis are the exception, not a habit.
+- Use at most one emoji, and only when it adds real meaning — genuine celebration, a lighthearted moment the user set up themselves, or a warning/status marker (⚠️, ✅) where it aids scanning.
+- Never use an emoji to end a sentence out of habit, to \"soften\" a message, or as decoration on a greeting.
+- When in doubt, use zero emojis. A conversation can go many messages with none — that's the correct default, not a failure state.
+
+Tone: confident, plain-spoken, not stiff. Skip corporate hedging (\"it's worth noting that\", \"I just wanted to mention\"). Say things directly.";
+
+#[derive(serde::Deserialize)]
+struct ChatMsgIn {
+    role: String,
+    content: String,
+}
+
+fn resolve_api_key() -> Result<String, String> {
+    if let Ok(key) = std::env::var("PETFISH_API_KEY") {
+        let key = key.trim();
+        if !key.is_empty() {
+            return Ok(key.to_string());
+        }
+    }
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
+    let env_file = std::path::Path::new(&manifest_dir).join(".chat.env");
+    if let Ok(contents) = std::fs::read_to_string(&env_file) {
+        for line in contents.lines() {
+            if let Some((name, value)) = line.split_once('=') {
+                if name.trim() == "PETFISH_API_KEY" {
+                    let value = value.trim();
+                    if !value.is_empty() {
+                        return Ok(value.to_string());
+                    }
+                }
+            }
+        }
+    }
+    Err("Chat brain is unplugged — set the PETFISH_API_KEY environment variable (or src-tauri/.chat.env).".to_string())
+}
+
+#[tauri::command]
+async fn chat_message(messages: Vec<ChatMsgIn>) -> Result<String, String> {
+    let key = resolve_api_key()?;
+    let base = std::env::var("PETFISH_API_BASE")
+        .unwrap_or_else(|_| "https://generativelanguage.googleapis.com/v1beta/openai".to_string());
+    let model = std::env::var("PETFISH_MODEL")
+        .unwrap_or_else(|_| "gemini-3.6-flash".to_string());
+
+    let history: Vec<_> = messages.into_iter().rev().take(12).collect();
+
+    let mut payload_messages: Vec<serde_json::Value> =
+        vec![serde_json::json!({ "role": "system", "content": CHAT_SYSTEM_PROMPT })];
+    for m in history.into_iter().rev() {
+        payload_messages.push(serde_json::json!({
+            "role": m.role,
+            "content": m.content
+        }));
+    }
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/chat/completions", base.trim_end_matches('/')))
+        .bearer_auth(&key)
+        .header("x-goog-api-key", &key)
+        .json(&serde_json::json!({
+            "model": model,
+            "messages": payload_messages,
+            "temperature": 0.8
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("Could not reach the chat service: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Chat request failed ({status}): {body}"));
+    }
+
+    let data: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Could not read the chat reply: {e}"))?;
+
+    let reply = data["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or("...")
+        .trim()
+        .to_string();
+
+    Ok(reply)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -72,7 +172,7 @@ pub fn run() {
         .manage(pause_state)
         .manage(shared_rect.clone())
         .manage(shared_snapshot.clone())
-        .invoke_handler(tauri::generate_handler![show_context_menu, update_character_rect, get_desktop_snapshot])
+        .invoke_handler(tauri::generate_handler![show_context_menu, update_character_rect, get_desktop_snapshot, chat_message])
         .setup(|app| {
             let window = app.get_webview_window("main").expect("no main window");
             
@@ -96,6 +196,9 @@ pub fn run() {
                     }
                     "close" => {
                         app_handle_menu.exit(0);
+                    }
+                    "minimize" => {
+                        let _ = app_handle_menu.emit("pet-bubble-toggle", ());
                     }
                     _ => {}
                 }
@@ -175,10 +278,14 @@ pub fn run() {
             let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&toggle_i, &quit_i])?;
             
-            let _tray = TrayIconBuilder::new()
+            let mut tray_builder = TrayIconBuilder::with_id("main_tray")
                 .menu(&menu)
-                .icon(app.default_window_icon().unwrap().clone())
-                .tooltip("Desktop Pet")
+                .tooltip("Desktop Pet");
+            if let Some(icon) = app.default_window_icon() {
+                tray_builder = tray_builder.icon(icon.clone());
+            }
+            
+            let tray = tray_builder
                 .on_menu_event(move |app, event| {
                     match event.id().as_ref() {
                         "quit" => {
@@ -199,6 +306,7 @@ pub fn run() {
                     }
                 })
                 .build(app)?;
+            app.manage(tray);
             
             Ok(())
         })

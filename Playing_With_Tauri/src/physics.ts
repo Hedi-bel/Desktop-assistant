@@ -9,6 +9,8 @@ const GRAVITY = 980;           // px/s²
 const WALK_SPEED = 60;         // px/s
 const IDLE_MIN_MS = 500;       // minimum idle time before walking
 const IDLE_MAX_MS = 2500;      // maximum idle time before walking
+const MAX_FALL_SPEED = 700;    // px/s terminal fall speed
+const AIR_DRAG = 2.5;          // 1/s damping while airborne
 
 export type PetState = 'idle' | 'walk' | 'fall' | 'land';
 
@@ -105,6 +107,36 @@ function randomIdleTime(): number {
   return IDLE_MIN_MS + Math.random() * (IDLE_MAX_MS - IDLE_MIN_MS);
 }
 
+/** Depth of the lowest platform top edge — the "floor" of the world. */
+function worldFloor(platforms: Platform[]): number {
+  let floor = -Infinity;
+  for (const p of platforms) {
+    floor = Math.max(floor, p.y);
+  }
+  return floor;
+}
+
+/** Place the character safely back on-screen, on the topmost platform if any. */
+function respawnCharacter(char: CharacterState, platforms: Platform[]): void {
+  char.vy = 0;
+  char.vx = 0;
+  let topmost: Platform | null = null;
+  for (const p of platforms) {
+    if (!topmost || p.y < topmost.y) topmost = p;
+  }
+  if (topmost) {
+    const minX = topmost.x + CHAR_WIDTH / 2;
+    const maxX = topmost.x + topmost.width - CHAR_WIDTH * 1.5;
+    char.x = maxX > minX ? minX + Math.random() * (maxX - minX) : topmost.x;
+    char.y = topmost.y - CHAR_HEIGHT - 2;
+    char.currentPlatform = topmost;
+  } else {
+    char.y = -CHAR_HEIGHT;
+    char.currentPlatform = null;
+  }
+  char.state = 'fall';
+}
+
 /**
  * Main physics update — called every frame.
  * @param char - mutable character state
@@ -140,10 +172,9 @@ export function updatePhysics(
         char.state = 'idle';
         char.idleTimer = 9999999; // effectively infinite until unpaused
       }
-      if (char.y > screenHeight + 100) {
-        char.y = -CHAR_HEIGHT;
-        char.x = Math.random() * (screenHeight > 0 ? 800 : 400);
-        char.vy = 0;
+      const floor = worldFloor(platforms);
+      if (char.y > screenHeight + 100 || (floor > -Infinity && char.y + CHAR_HEIGHT > floor)) {
+        respawnCharacter(char, platforms);
       }
     }
     // For idle / walk / land: do nothing — pet is frozen.
@@ -217,23 +248,37 @@ export function updatePhysics(
     case 'fall': {
       const prevY = char.y;
       char.vy += GRAVITY * dt;
+      char.vy = Math.min(char.vy, MAX_FALL_SPEED);
       char.y += char.vy * dt;
-      
+      char.x += char.vx * dt;
+      const decay = Math.max(0, 1 - AIR_DRAG * dt);
+      char.vx *= decay;
+      char.vy *= decay;
+
       // Check for landing on any platform
       const landing = findLandingPlatform(char, prevY, platforms);
       if (landing) {
         char.y = landing.y - CHAR_HEIGHT;
         char.vy = 0;
         char.currentPlatform = landing;
-        char.state = 'land';
-        char.landTimer = 150; // brief land squash animation (ms)
+        if (Math.abs(char.vx) > 60) {
+          // Carry the throw's horizontal momentum: glide forward along the platform
+          const glide = Math.sign(char.vx) * Math.max(Math.abs(char.vx) * 0.6, 120);
+          char.targetX = char.x + glide;
+          char.facing = glide >= 0 ? 1 : -1;
+          char.vx = 0;
+          char.state = 'walk';
+        } else {
+          char.vx = 0;
+          char.state = 'land';
+          char.landTimer = 150; // brief land squash animation (ms)
+        }
       }
       
-      // If fallen below screen, respawn at top
-      if (char.y > screenHeight + 100) {
-        char.y = -CHAR_HEIGHT;
-        char.x = Math.random() * (screenHeight > 0 ? 800 : 400);
-        char.vy = 0;
+      // If fallen below the platform floor or screen, respawn on the topmost platform
+      const floor = worldFloor(platforms);
+      if (char.y > screenHeight + 100 || (floor > -Infinity && char.y + CHAR_HEIGHT > floor)) {
+        respawnCharacter(char, platforms);
       }
       break;
     }

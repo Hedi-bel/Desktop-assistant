@@ -1,4 +1,4 @@
-import { Application, Graphics, Container } from 'pixi.js';
+import { Application, AnimatedSprite, Container, Rectangle } from 'pixi.js';
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { DesktopSnapshot, buildPlatforms } from './types';
@@ -11,11 +11,68 @@ import {
   CHAR_HEIGHT,
 } from './physics';
 import type { CharacterState } from './physics';
+import { STATE_CLIPS, CHAR_SCALE, loadCharacterClips } from './sprites';
+import type { CharacterClips } from './sprites';
+import { trimReply, CHAT_HISTORY_LIMIT } from './chat';
+import type { ChatMsg } from './chat';
+import cuteIconUrl from './assets/cute_icon.jpg';
 
 // ── State ──
 let platforms: Platform[] = [];
 let character: CharacterState;
 let petVisible = true;
+let clips: CharacterClips;
+let chibiSprite: AnimatedSprite;
+let lastAnimatedState: CharacterState['state'] | null = null;
+
+// ── Drag & Drop ──
+const DRAG_HISTORY_MS = 120;
+let dragging = false;
+let pressMoved = false;
+let grabDX = 0;
+let grabDY = 0;
+let dragStartX = 0;
+let dragStartY = 0;
+let dragHistory: { x: number; y: number; t: number }[] = [];
+
+// ── Bubble Mode ──
+const BUBBLE_SIZE = 64;
+let bubbleMode = false;
+let bubbleEl: HTMLDivElement;
+let bubbleImg: HTMLImageElement;
+let bubbleDragging = false;
+let bubblePressMoved = false;
+let bubbleGrabDX = 0;
+let bubbleGrabDY = 0;
+let bubbleDragStartX = 0;
+let bubbleDragStartY = 0;
+let lastBubbleSyncX = -9999;
+let lastBubbleSyncY = -9999;
+let lastBubbleSyncTime = 0;
+
+// ── Chat Mode ──
+const CHAT_W = 340;
+const CHAT_H = 480;
+let chatMode = false;
+let chatEl: HTMLDivElement;
+let chatAvatar: HTMLImageElement;
+let chatBody: HTMLDivElement;
+let chatInput: HTMLInputElement;
+let chatSend: HTMLButtonElement;
+let chatHeader: HTMLDivElement;
+let chatCloseBtn: HTMLButtonElement;
+let chatDragging = false;
+let chatPressMoved = false;
+let chatClosePress = false;
+let chatGrabDX = 0;
+let chatGrabDY = 0;
+let chatDragStartX = 0;
+let chatDragStartY = 0;
+let lastChatSyncX = -9999;
+let lastChatSyncY = -9999;
+let lastChatSyncTime = 0;
+let chatHistory: ChatMsg[] = [];
+let chatPending = false;
 
 // ── PixiJS Setup ──
 const app = new Application();
@@ -29,6 +86,142 @@ const SYNC_INTERVAL_MS = 100; // 10 Hz periodic drift correction
 let lastSyncX = -9999;
 let lastSyncY = -9999;
 let lastSyncTime = 0;
+
+function visibleBottom(): number {
+  let floor = -Infinity;
+  for (const p of platforms) {
+    floor = Math.max(floor, p.y);
+  }
+  return Number.isFinite(floor) ? floor : window.innerHeight;
+}
+
+function pickBubbleIcon(): void {
+  bubbleImg.src = cuteIconUrl;
+}
+
+function syncBubbleRect(force = false): void {
+  if (!bubbleEl) return;
+  const rect = bubbleEl.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const offsetX = window.screenX || 0;
+  const offsetY = window.screenY || 0;
+
+  const physX = Math.round((rect.left + offsetX) * dpr);
+  const physY = Math.round((rect.top + offsetY) * dpr);
+  const physW = Math.round(rect.width * dpr);
+  const physH = Math.round(rect.height * dpr);
+
+  if (!force && physX === lastBubbleSyncX && physY === lastBubbleSyncY) return;
+  lastBubbleSyncX = physX;
+  lastBubbleSyncY = physY;
+
+  invoke('update_character_rect', { x: physX, y: physY, w: physW, h: physH }).catch(() => {});
+}
+
+// ── Chat Helpers ──
+function openChat(): void {
+  chatMode = true;
+  bubbleEl.classList.remove('visible');
+  chatAvatar.src = bubbleImg.src || cuteIconUrl;
+  chatEl.style.left = `${Math.max(window.innerWidth - CHAT_W - 16, 0)}px`;
+  chatEl.style.top = `${Math.min(Math.max(visibleBottom() - CHAT_H - 16, 0), window.innerHeight - CHAT_H)}px`;
+  chatEl.classList.add('visible');
+  lastChatSyncX = -9999;
+  lastChatSyncY = -9999;
+  syncChatRect(true);
+  chatInput.focus();
+}
+
+function closeChat(): void {
+  chatMode = false;
+  chatEl.classList.remove('visible');
+  bubbleEl.classList.add('visible');
+  lastBubbleSyncX = -9999;
+  lastBubbleSyncY = -9999;
+  syncBubbleRect(true);
+}
+
+function syncChatRect(force = false): void {
+  if (!chatEl) return;
+  const rect = chatEl.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const offsetX = window.screenX || 0;
+  const offsetY = window.screenY || 0;
+
+  const physX = Math.round((rect.left + offsetX) * dpr);
+  const physY = Math.round((rect.top + offsetY) * dpr);
+  const physW = Math.round(rect.width * dpr);
+  const physH = Math.round(rect.height * dpr);
+
+  if (!force && physX === lastChatSyncX && physY === lastChatSyncY) return;
+  lastChatSyncX = physX;
+  lastChatSyncY = physY;
+
+  invoke('update_character_rect', { x: physX, y: physY, w: physW, h: physH }).catch(() => {});
+}
+
+function appendMessage(role: ChatMsg['role'], text: string): void {
+  const row = document.createElement('div');
+  row.className = `chat-row ${role}`;
+  if (role === 'assistant') {
+    const avatar = document.createElement('img');
+    avatar.className = 'chat-msg-avatar';
+    avatar.src = chatAvatar.src;
+    row.appendChild(avatar);
+  }
+  const bubble = document.createElement('div');
+  bubble.className = 'chat-bubble';
+  bubble.textContent = text;
+  row.appendChild(bubble);
+  chatBody.appendChild(row);
+  chatBody.scrollTop = chatBody.scrollHeight;
+}
+
+function setTyping(on: boolean): void {
+  let typingRow = chatBody.querySelector('.chat-row.pet.typing') as HTMLDivElement | null;
+  if (on && !typingRow) {
+    typingRow = document.createElement('div');
+    typingRow.className = 'chat-row pet typing';
+    const avatar = document.createElement('img');
+    avatar.className = 'chat-msg-avatar';
+    avatar.src = chatAvatar.src;
+    typingRow.appendChild(avatar);
+    const bubble = document.createElement('div');
+    bubble.className = 'chat-bubble';
+    bubble.textContent = '…';
+    typingRow.appendChild(bubble);
+    chatBody.appendChild(typingRow);
+    chatBody.scrollTop = chatBody.scrollHeight;
+  } else if (!on && typingRow) {
+    typingRow.remove();
+  }
+}
+
+async function sendMessage(): Promise<void> {
+  const text = chatInput.value.trim();
+  if (!text || chatPending) return;
+  chatInput.value = '';
+  appendMessage('user', text);
+  chatHistory.push({ role: 'user', content: text });
+  chatHistory = chatHistory.slice(-CHAT_HISTORY_LIMIT);
+  chatPending = true;
+  chatSend.disabled = true;
+  setTyping(true);
+  try {
+    const reply = trimReply(await invoke<string>('chat_message', { messages: chatHistory }));
+    chatHistory.push({ role: 'assistant', content: reply });
+    chatHistory = chatHistory.slice(-CHAT_HISTORY_LIMIT);
+    setTyping(false);
+    appendMessage('assistant', reply);
+  } catch (err) {
+    setTyping(false);
+    appendMessage('assistant', String(err));
+  } finally {
+    chatPending = false;
+    chatSend.disabled = false;
+    chatInput.focus();
+  }
+}
 
 async function syncCharacterRect(charX: number, charY: number, force = false): Promise<void> {
   // Convert from CSS px (PixiJS space) to physical screen px (Tauri window position)
@@ -61,6 +254,45 @@ async function init() {
   
   const container = document.getElementById('app')!;
   container.appendChild(app.canvas);
+
+  // ── Bubble Element ──
+  bubbleEl = document.createElement('div');
+  bubbleEl.className = 'bubble';
+  bubbleImg = document.createElement('img');
+  bubbleEl.appendChild(bubbleImg);
+  container.appendChild(bubbleEl);
+
+  // ── Chat Element ──
+  chatEl = document.createElement('div');
+  chatEl.className = 'chat';
+  chatHeader = document.createElement('div');
+  chatHeader.className = 'chat-header';
+  chatAvatar = document.createElement('img');
+  chatAvatar.className = 'chat-avatar';
+  chatHeader.appendChild(chatAvatar);
+  const chatTitle = document.createElement('div');
+  chatTitle.className = 'chat-header-title';
+  chatTitle.textContent = 'Pet';
+  chatHeader.appendChild(chatTitle);
+  chatCloseBtn = document.createElement('button');
+  chatCloseBtn.className = 'chat-close';
+  chatCloseBtn.textContent = '✕';
+  chatHeader.appendChild(chatCloseBtn);
+  chatBody = document.createElement('div');
+  chatBody.className = 'chat-body';
+  const chatInputBar = document.createElement('div');
+  chatInputBar.className = 'chat-input';
+  chatInput = document.createElement('input');
+  chatInput.placeholder = 'Type a message…';
+  chatSend = document.createElement('button');
+  chatSend.className = 'chat-send';
+  chatSend.textContent = '➤';
+  chatInputBar.appendChild(chatInput);
+  chatInputBar.appendChild(chatSend);
+  chatEl.appendChild(chatHeader);
+  chatEl.appendChild(chatBody);
+  chatEl.appendChild(chatInputBar);
+  container.appendChild(chatEl);
   
   // Create character state
   character = createCharacter(window.innerWidth);
@@ -71,18 +303,39 @@ async function init() {
   // Enable interaction on the character
   charContainer.eventMode = 'static';
   charContainer.cursor = 'pointer';
+  charContainer.hitArea = new Rectangle(0, 0, CHAR_WIDTH, CHAR_HEIGHT);
   charContainer.on('pointerdown', (e) => {
-    // Left click only
+    // Left button only
     if (e.button === 0) {
-      invoke('show_context_menu').catch(console.error);
+      dragging = true;
+      pressMoved = false;
+      const mx = e.global.x;
+      const my = e.global.y;
+      grabDX = mx - character.x;
+      grabDY = my - character.y;
+      dragStartX = mx;
+      dragStartY = my;
+      dragHistory = [{ x: mx, y: my, t: performance.now() }];
+      try {
+        app.canvas.setPointerCapture(e.pointerId);
+      } catch {
+        // Pointer capture unavailable; drag still works while inside the window
+      }
     }
   });
   
   app.stage.addChild(charContainer);
   
-  // ── Draw Placeholder Chibi ──
-  const chibi = drawChibiCharacter();
-  charContainer.addChild(chibi);
+  // ── Character Sprite ──
+  clips = await loadCharacterClips();
+  const sprite = new AnimatedSprite(clips.idle);
+  sprite.anchor.set(0.5, 1);
+  sprite.scale.set(CHAR_SCALE);
+  const vis = new Container();
+  vis.addChild(sprite);
+  charContainer.addChild(vis);
+  chibiSprite = sprite;
+  setStateAnimation(character.state);
   
   // ── Tauri Event Listeners ──
   if ('__TAURI_INTERNALS__' in window) {
@@ -111,27 +364,201 @@ async function init() {
       // If hidden, push a dummy rect off-screen so you can't click an invisible pet
       if (!petVisible) {
         invoke('update_character_rect', { x: -9999, y: -9999, w: 0, h: 0 }).catch(() => {});
-      } else {
+      } else if (!bubbleMode) {
         syncCharacterRect(character.x, character.y, true).catch(() => {});
       }
     });
 
     await listen<void>('pet-pause-toggle', () => {
       character.paused = !character.paused;
+      if (character.paused) {
+        chibiSprite.stop();
+      } else {
+        chibiSprite.play();
+      }
       if (!character.paused && (character.state === 'idle' || character.state === 'land')) {
         const randomIdleTimeMs = 500 + Math.random() * 2000;
         character.idleTimer = randomIdleTimeMs;
       }
-      syncCharacterRect(character.x, character.y, true).catch(() => {});
+      if (!bubbleMode) {
+        syncCharacterRect(character.x, character.y, true).catch(() => {});
+      }
+    });
+
+    await listen<void>('pet-bubble-toggle', () => {
+      bubbleMode = true;
+      petVisible = false;
+      charContainer.visible = false;
+      lastBubbleSyncX = -9999;
+      lastBubbleSyncY = -9999;
+      pickBubbleIcon();
+      bubbleEl.style.left = `${Math.max(window.innerWidth - BUBBLE_SIZE - 32, 0)}px`;
+      bubbleEl.style.top = `${Math.min(window.innerHeight * 0.4, visibleBottom() - BUBBLE_SIZE)}px`;
+      bubbleEl.classList.add('visible');
+      syncBubbleRect(true);
     });
   } else {
     console.warn("Tauri APIs not available! It looks like you opened this in a normal web browser. The Desktop Pet requires the native Tauri window to function properly.");
   }
   
+  // ── Drag Listeners ──
+  window.addEventListener('pointermove', (e) => {
+    if (!dragging) return;
+    if (!pressMoved && Math.hypot(e.clientX - dragStartX, e.clientY - dragStartY) > 4) {
+      pressMoved = true;
+    }
+    character.x = Math.min(Math.max(e.clientX - grabDX, 0), window.innerWidth - CHAR_WIDTH);
+    character.y = Math.min(Math.max(e.clientY - grabDY, 0), visibleBottom() - CHAR_HEIGHT);
+
+    const now = performance.now();
+    dragHistory.push({ x: e.clientX, y: e.clientY, t: now });
+    while (dragHistory.length > 2 && now - dragHistory[0].t > DRAG_HISTORY_MS) {
+      dragHistory.shift();
+    }
+  });
+
+  window.addEventListener('pointerup', () => {
+    if (!dragging) return;
+    dragging = false;
+    if (pressMoved && dragHistory.length >= 2) {
+      const first = dragHistory[0];
+      const last = dragHistory[dragHistory.length - 1];
+      const spanMs = last.t - first.t;
+      if (spanMs > 20) {
+        const scale = 1000 / spanMs;
+        character.vx = Math.min(Math.max((last.x - first.x) * scale, -700), 700);
+        character.vy = Math.min(Math.max((last.y - first.y) * scale, -700), 700);
+      }
+    }
+    if (!pressMoved) {
+      invoke('show_context_menu').catch(console.error);
+    }
+  });
+
+  window.addEventListener('pointercancel', () => {
+    dragging = false;
+  });
+
+  // ── Bubble Listeners ──
+  bubbleEl.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    bubbleDragging = true;
+    bubblePressMoved = false;
+    const rect = bubbleEl.getBoundingClientRect();
+    bubbleGrabDX = e.clientX - rect.left;
+    bubbleGrabDY = e.clientY - rect.top;
+    bubbleDragStartX = e.clientX;
+    bubbleDragStartY = e.clientY;
+    try {
+      bubbleEl.setPointerCapture(e.pointerId);
+    } catch {
+      // Pointer capture unavailable; drag still works while inside the window
+    }
+  });
+
+  window.addEventListener('pointermove', (e) => {
+    if (!bubbleDragging) return;
+    if (!bubblePressMoved && Math.hypot(e.clientX - bubbleDragStartX, e.clientY - bubbleDragStartY) > 4) {
+      bubblePressMoved = true;
+      bubbleEl.classList.add('dragging');
+    }
+    const left = Math.min(Math.max(e.clientX - bubbleGrabDX, 0), window.innerWidth - BUBBLE_SIZE);
+    const top = Math.min(Math.max(e.clientY - bubbleGrabDY, 0), visibleBottom() - BUBBLE_SIZE);
+    bubbleEl.style.left = `${left}px`;
+    bubbleEl.style.top = `${top}px`;
+    syncBubbleRect();
+  });
+
+  window.addEventListener('pointerup', () => {
+    if (!bubbleDragging) return;
+    bubbleDragging = false;
+    bubbleEl.classList.remove('dragging');
+    syncBubbleRect(true);
+    if (!bubblePressMoved) {
+      openChat();
+    }
+  });
+
+  window.addEventListener('pointercancel', () => {
+    bubbleDragging = false;
+  });
+
+  // ── Chat Listeners ──
+  chatHeader.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    chatDragging = true;
+    chatPressMoved = false;
+    chatClosePress = e.target === chatCloseBtn;
+    const rect = chatEl.getBoundingClientRect();
+    chatGrabDX = e.clientX - rect.left;
+    chatGrabDY = e.clientY - rect.top;
+    chatDragStartX = e.clientX;
+    chatDragStartY = e.clientY;
+    try {
+      chatHeader.setPointerCapture(e.pointerId);
+    } catch {
+      // Pointer capture unavailable; drag still works while inside the window
+    }
+  });
+
+  window.addEventListener('pointermove', (e) => {
+    if (!chatDragging) return;
+    if (!chatPressMoved && Math.hypot(e.clientX - chatDragStartX, e.clientY - chatDragStartY) > 4) {
+      chatPressMoved = true;
+      chatEl.classList.add('dragging');
+    }
+    const left = Math.min(Math.max(e.clientX - chatGrabDX, 0), window.innerWidth - CHAT_W);
+    const top = Math.min(Math.max(e.clientY - chatGrabDY, 0), visibleBottom() - CHAT_H);
+    chatEl.style.left = `${left}px`;
+    chatEl.style.top = `${top}px`;
+    syncChatRect();
+  });
+
+  window.addEventListener('pointerup', () => {
+    if (!chatDragging) return;
+    chatDragging = false;
+    chatEl.classList.remove('dragging');
+    syncChatRect(true);
+    if (!chatPressMoved && chatClosePress) {
+      chatClosePress = false;
+      closeChat();
+    }
+  });
+
+  window.addEventListener('pointercancel', () => {
+    chatDragging = false;
+    chatClosePress = false;
+  });
+
+  chatSend.addEventListener('click', () => {
+    void sendMessage();
+  });
+
+  chatInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      void sendMessage();
+    }
+  });
+
   // ── Render Loop ──
-  let walkAnimTime = 0;
-  
   app.ticker.add((ticker) => {
+    if (chatMode) {
+      const now = performance.now();
+      if (now - lastChatSyncTime >= SYNC_INTERVAL_MS) {
+        lastChatSyncTime = now;
+        syncChatRect();
+      }
+      return;
+    }
+    if (bubbleMode) {
+      const now = performance.now();
+      if (now - lastBubbleSyncTime >= SYNC_INTERVAL_MS) {
+        lastBubbleSyncTime = now;
+        syncBubbleRect();
+      }
+      return;
+    }
     if (!petVisible) return;
     
     const dt = ticker.deltaMS / 1000;
@@ -140,36 +567,36 @@ async function init() {
     const prevX = character.x;
     const prevY = character.y;
     
-    updatePhysics(character, dt, platforms, window.innerHeight);
+    if (dragging) {
+      character.state = 'fall';
+      character.vy = 0;
+      character.vx = 0;
+      character.landTimer = 0;
+    } else {
+      updatePhysics(character, dt, platforms, window.innerHeight);
+    }
+    character.x = Math.min(Math.max(character.x, 0), window.innerWidth - CHAR_WIDTH);
+    
+    setStateAnimation(character.state);
+    if (character.paused) {
+      chibiSprite.stop();
+    } else if (!chibiSprite.playing) {
+      chibiSprite.play();
+    }
     
     charContainer.x = character.x;
     charContainer.y = character.y;
-    
-    if (character.state === 'walk') {
-      walkAnimTime += dt * 8; 
-    } else {
-      walkAnimTime = 0;
-    }
-    
-    charContainer.scale.x = character.facing;
-    if (character.facing === -1) {
-      charContainer.x += CHAR_WIDTH; 
-    }
-    
+
+    vis.x = chibiSprite.width / 2;
+    vis.y = CHAR_HEIGHT;
+    vis.scale.x = character.facing;
+
     if (character.state === 'land') {
       const t = character.landTimer / 150;
-      charContainer.scale.y = 1 - 0.15 * t; 
-      charContainer.y += CHAR_HEIGHT * 0.15 * t; 
+      vis.scale.y = 1 - 0.15 * t;
     } else {
-      charContainer.scale.y = 1;
+      vis.scale.y = 1;
     }
-    
-    if (character.state === 'walk') {
-      charContainer.y += Math.sin(walkAnimTime) * 2;
-    }
-    
-    chibi.clear();
-    drawChibiOnto(chibi, walkAnimTime, character.state);
 
     // ── Sync Strategy ──
     if ('__TAURI_INTERNALS__' in window) {
@@ -186,108 +613,18 @@ async function init() {
   });
 }
 
-function drawChibiCharacter(): Graphics {
-  const g = new Graphics();
-  // Draw an invisible background to ensure the entire CHAR_WIDTH x CHAR_HEIGHT
-  // area registers pointer events (since the character itself is small limbs/head)
-  g.rect(0, 0, CHAR_WIDTH, CHAR_HEIGHT);
-  g.fill({ color: 0xFFFFFF, alpha: 0.001 }); // Almost entirely transparent
-  
-  drawChibiOnto(g, 0, 'idle');
-  return g;
+function applyClip(sprite: AnimatedSprite, state: CharacterState['state']): void {
+  const clip = STATE_CLIPS[state];
+  sprite.textures = clips[state];
+  sprite.animationSpeed = clip.fps / 60;
+  sprite.loop = clip.loop;
 }
 
-function drawChibiOnto(g: Graphics, walkTime: number, state: string): void {
-  const w = CHAR_WIDTH;
-  const h = CHAR_HEIGHT;
-  
-  const skinColor = 0xFFDFC4;
-  const hairColor = 0x4A3728;
-  const bodyColor = 0xFF6B8A;
-  const eyeColor = 0x2D2D2D;
-  const blushColor = 0xFFAAAA;
-  const shoeColor = 0x4A3728;
-  
-  g.beginPath();
-  g.moveTo(w * 0.25, h * 0.45);
-  g.lineTo(w * 0.75, h * 0.45);
-  g.lineTo(w * 0.8, h * 0.72);
-  g.lineTo(w * 0.2, h * 0.72);
-  g.closePath();
-  g.fill({ color: bodyColor });
-  
-  const legSwing = state === 'walk' ? Math.sin(walkTime) * 4 : 0;
-  
-  g.roundRect(w * 0.3 - legSwing, h * 0.7, w * 0.15, h * 0.18, 3);
-  g.fill({ color: skinColor });
-  g.roundRect(w * 0.28 - legSwing, h * 0.86, w * 0.19, h * 0.08, 3);
-  g.fill({ color: shoeColor });
-  
-  g.roundRect(w * 0.55 + legSwing, h * 0.7, w * 0.15, h * 0.18, 3);
-  g.fill({ color: skinColor });
-  g.roundRect(w * 0.53 + legSwing, h * 0.86, w * 0.19, h * 0.08, 3);
-  g.fill({ color: shoeColor });
-  
-  const headCX = w * 0.5;
-  const headCY = h * 0.28;
-  const headR = w * 0.32;
-  
-  g.circle(headCX, headCY, headR + 3);
-  g.fill({ color: hairColor });
-  
-  g.circle(headCX, headCY + 2, headR - 2);
-  g.fill({ color: skinColor });
-  
-  g.beginPath();
-  g.arc(headCX, headCY - 2, headR, -Math.PI, 0);
-  g.lineTo(headCX + headR - 2, headCY + 2);
-  g.lineTo(headCX - headR + 2, headCY + 2);
-  g.closePath();
-  g.fill({ color: hairColor });
-  
-  g.beginPath();
-  g.moveTo(headCX - headR, headCY);
-  g.lineTo(headCX - headR - 4, headCY + 14);
-  g.lineTo(headCX - headR + 4, headCY + 10);
-  g.closePath();
-  g.fill({ color: hairColor });
-  
-  g.beginPath();
-  g.moveTo(headCX + headR, headCY);
-  g.lineTo(headCX + headR + 4, headCY + 14);
-  g.lineTo(headCX + headR - 4, headCY + 10);
-  g.closePath();
-  g.fill({ color: hairColor });
-  
-  const eyeY = headCY + 4;
-  const eyeSpacing = w * 0.12;
-  
-  g.circle(headCX - eyeSpacing, eyeY, 2.5);
-  g.fill({ color: eyeColor });
-  g.circle(headCX - eyeSpacing + 1, eyeY - 1, 0.8);
-  g.fill({ color: 0xFFFFFF });
-  
-  g.circle(headCX + eyeSpacing, eyeY, 2.5);
-  g.fill({ color: eyeColor });
-  g.circle(headCX + eyeSpacing + 1, eyeY - 1, 0.8);
-  g.fill({ color: 0xFFFFFF });
-  
-  g.circle(headCX - eyeSpacing - 3, eyeY + 4, 3);
-  g.fill({ color: blushColor, alpha: 0.4 });
-  g.circle(headCX + eyeSpacing + 3, eyeY + 4, 3);
-  g.fill({ color: blushColor, alpha: 0.4 });
-  
-  g.beginPath();
-  g.arc(headCX, eyeY + 7, 2, 0, Math.PI);
-  g.stroke({ color: eyeColor, width: 1 });
-  
-  const armSwing = state === 'walk' ? Math.sin(walkTime + Math.PI) * 3 : 0;
-  
-  g.roundRect(w * 0.12, h * 0.47 + armSwing, w * 0.13, h * 0.15, 3);
-  g.fill({ color: skinColor });
-  
-  g.roundRect(w * 0.75, h * 0.47 - armSwing, w * 0.13, h * 0.15, 3);
-  g.fill({ color: skinColor });
+function setStateAnimation(state: CharacterState['state']): void {
+  if (!clips || !chibiSprite || state === lastAnimatedState) return;
+  lastAnimatedState = state;
+  applyClip(chibiSprite, state);
+  chibiSprite.gotoAndPlay(0);
 }
 
 init().catch(console.error);
