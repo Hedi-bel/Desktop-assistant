@@ -16,9 +16,11 @@ import type { CharacterClips } from './sprites';
 import { trimReply, CHAT_HISTORY_LIMIT } from './chat';
 import type { ChatMsg } from './chat';
 import cuteIconUrl from './assets/cute_icon.jpg';
+import respawnIconUrl from './assets/respawn_icon.png';
 
 // ── State ──
 let platforms: Platform[] = [];
+let charContainer: Container;
 let character: CharacterState;
 let petVisible = true;
 let clips: CharacterClips;
@@ -36,7 +38,10 @@ let dragStartY = 0;
 let dragHistory: { x: number; y: number; t: number }[] = [];
 
 // ── Bubble Mode ──
-const BUBBLE_SIZE = 64;
+const BUBBLE_SIZE = 56;
+const CLOSE_ZONE_SIZE = 56;
+let closeZoneEl: HTMLDivElement;
+let closeZoneArmed = false;
 let bubbleMode = false;
 let bubbleEl: HTMLDivElement;
 let bubbleImg: HTMLImageElement;
@@ -51,8 +56,12 @@ let lastBubbleSyncY = -9999;
 let lastBubbleSyncTime = 0;
 
 // ── Chat Mode ──
-const CHAT_W = 340;
-const CHAT_H = 480;
+const DEFAULT_CHAT_W = 320;
+const DEFAULT_CHAT_H = 400;
+const MIN_CHAT_W = 240;
+const MIN_CHAT_H = 320;
+let chatW = DEFAULT_CHAT_W;
+let chatH = DEFAULT_CHAT_H;
 let chatMode = false;
 let chatEl: HTMLDivElement;
 let chatAvatar: HTMLImageElement;
@@ -61,9 +70,21 @@ let chatInput: HTMLInputElement;
 let chatSend: HTMLButtonElement;
 let chatHeader: HTMLDivElement;
 let chatCloseBtn: HTMLButtonElement;
+let chatRespawnBtn: HTMLButtonElement;
 let chatDragging = false;
 let chatPressMoved = false;
 let chatClosePress = false;
+let chatRespawnPress = false;
+let chatResizing = false;
+let chatResizeCorner: 'se' | 'sw' | 'ne' | 'nw' = 'se';
+let chatResizeStartX = 0;
+let chatResizeStartY = 0;
+let chatStartLeft = 0;
+let chatStartTop = 0;
+let chatStartW = DEFAULT_CHAT_W;
+let chatStartH = DEFAULT_CHAT_H;
+let chatStartRight = 0;
+let chatStartBottom = 0;
 let chatGrabDX = 0;
 let chatGrabDY = 0;
 let chatDragStartX = 0;
@@ -99,6 +120,27 @@ function pickBubbleIcon(): void {
   bubbleImg.src = cuteIconUrl;
 }
 
+function positionCloseZone(): void {
+  if (!closeZoneEl) return;
+  closeZoneEl.style.left = `${(window.innerWidth - CLOSE_ZONE_SIZE) / 2}px`;
+  closeZoneEl.style.top = `${visibleBottom() - CLOSE_ZONE_SIZE - 12}px`;
+}
+
+function setCloseZoneArmed(armed: boolean): void {
+  if (!closeZoneEl || armed === closeZoneArmed) return;
+  closeZoneArmed = armed;
+  closeZoneEl.classList.toggle('armed', armed);
+}
+
+function overCloseZone(el: HTMLElement): boolean {
+  if (!closeZoneEl) return false;
+  const a = el.getBoundingClientRect();
+  const b = closeZoneEl.getBoundingClientRect();
+  const aCx = a.left + a.width / 2;
+  const aCy = a.top + a.height / 2;
+  return aCx >= b.left && aCx <= b.right && aCy >= b.top && aCy <= b.bottom;
+}
+
 function syncBubbleRect(force = false): void {
   if (!bubbleEl) return;
   const rect = bubbleEl.getBoundingClientRect();
@@ -123,8 +165,10 @@ function openChat(): void {
   chatMode = true;
   bubbleEl.classList.remove('visible');
   chatAvatar.src = bubbleImg.src || cuteIconUrl;
-  chatEl.style.left = `${Math.max(window.innerWidth - CHAT_W - 16, 0)}px`;
-  chatEl.style.top = `${Math.min(Math.max(visibleBottom() - CHAT_H - 16, 0), window.innerHeight - CHAT_H)}px`;
+  chatEl.style.left = `${Math.max(window.innerWidth - chatW - 16, 0)}px`;
+  chatEl.style.top = `${Math.min(Math.max(visibleBottom() - chatH - 16, 0), window.innerHeight - chatH)}px`;
+  chatEl.style.width = `${chatW}px`;
+  chatEl.style.height = `${chatH}px`;
   chatEl.classList.add('visible');
   lastChatSyncX = -9999;
   lastChatSyncY = -9999;
@@ -139,6 +183,31 @@ function closeChat(): void {
   lastBubbleSyncX = -9999;
   lastBubbleSyncY = -9999;
   syncBubbleRect(true);
+}
+
+function respawnPet(): void {
+  bubbleMode = false;
+  petVisible = true;
+  charContainer.visible = true;
+  bubbleEl.classList.remove('visible');
+  closeZoneEl.classList.remove('visible');
+  setCloseZoneArmed(false);
+  if (chatMode) {
+    chatMode = false;
+    chatEl.classList.remove('visible');
+  }
+  character.paused = false;
+  chibiSprite.play();
+  character.vx = 0;
+  character.vy = 0;
+  character.landTimer = 0;
+  character.idleTimer = 0;
+  character.x = Math.max(Math.min((window.innerWidth - CHAR_WIDTH) / 2, window.innerWidth - CHAR_WIDTH), 0);
+  character.y = 0;
+  character.state = 'fall';
+  lastSyncX = character.x;
+  lastSyncY = character.y;
+  syncCharacterRect(character.x, character.y, true).catch(() => {});
 }
 
 function syncChatRect(force = false): void {
@@ -262,6 +331,13 @@ async function init() {
   bubbleEl.appendChild(bubbleImg);
   container.appendChild(bubbleEl);
 
+  // ── Close Zone Element ──
+  closeZoneEl = document.createElement('div');
+  closeZoneEl.className = 'close-zone';
+  closeZoneEl.textContent = '✕';
+  container.appendChild(closeZoneEl);
+  positionCloseZone();
+
   // ── Chat Element ──
   chatEl = document.createElement('div');
   chatEl.className = 'chat';
@@ -272,8 +348,16 @@ async function init() {
   chatHeader.appendChild(chatAvatar);
   const chatTitle = document.createElement('div');
   chatTitle.className = 'chat-header-title';
-  chatTitle.textContent = 'Pet';
+  chatTitle.textContent = 'Frieren-Assistant';
   chatHeader.appendChild(chatTitle);
+  chatRespawnBtn = document.createElement('button');
+  chatRespawnBtn.className = 'chat-respawn';
+  chatRespawnBtn.title = 'Respawn pet';
+  const respawnImg = document.createElement('img');
+  respawnImg.src = respawnIconUrl;
+  respawnImg.alt = '';
+  chatRespawnBtn.appendChild(respawnImg);
+  chatHeader.appendChild(chatRespawnBtn);
   chatCloseBtn = document.createElement('button');
   chatCloseBtn.className = 'chat-close';
   chatCloseBtn.textContent = '✕';
@@ -292,13 +376,38 @@ async function init() {
   chatEl.appendChild(chatHeader);
   chatEl.appendChild(chatBody);
   chatEl.appendChild(chatInputBar);
+  const resizeCorners: Array<'se' | 'sw' | 'ne' | 'nw'> = ['se', 'sw', 'ne', 'nw'];
+  for (const corner of resizeCorners) {
+    const handle = document.createElement('div');
+    handle.className = `chat-resize ${corner}`;
+    chatEl.appendChild(handle);
+    handle.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      chatResizing = true;
+      chatResizeCorner = corner;
+      chatResizeStartX = e.clientX;
+      chatResizeStartY = e.clientY;
+      const rect = chatEl.getBoundingClientRect();
+      chatStartLeft = rect.left;
+      chatStartTop = rect.top;
+      chatStartW = rect.width;
+      chatStartH = rect.height;
+      chatStartRight = rect.left + rect.width;
+      chatStartBottom = rect.top + rect.height;
+      try {
+        handle.setPointerCapture(e.pointerId);
+      } catch {
+        // Pointer capture unavailable; resize still works while inside the window
+      }
+    });
+  }
   container.appendChild(chatEl);
   
   // Create character state
   character = createCharacter(window.innerWidth);
   
   // Create the character sprite container
-  const charContainer = new Container();
+  charContainer = new Container();
   
   // Enable interaction on the character
   charContainer.eventMode = 'static';
@@ -369,22 +478,6 @@ async function init() {
       }
     });
 
-    await listen<void>('pet-pause-toggle', () => {
-      character.paused = !character.paused;
-      if (character.paused) {
-        chibiSprite.stop();
-      } else {
-        chibiSprite.play();
-      }
-      if (!character.paused && (character.state === 'idle' || character.state === 'land')) {
-        const randomIdleTimeMs = 500 + Math.random() * 2000;
-        character.idleTimer = randomIdleTimeMs;
-      }
-      if (!bubbleMode) {
-        syncCharacterRect(character.x, character.y, true).catch(() => {});
-      }
-    });
-
     await listen<void>('pet-bubble-toggle', () => {
       bubbleMode = true;
       petVisible = false;
@@ -444,6 +537,9 @@ async function init() {
     if (e.button !== 0) return;
     bubbleDragging = true;
     bubblePressMoved = false;
+    positionCloseZone();
+    closeZoneEl.classList.add('visible');
+    setCloseZoneArmed(false);
     const rect = bubbleEl.getBoundingClientRect();
     bubbleGrabDX = e.clientX - rect.left;
     bubbleGrabDY = e.clientY - rect.top;
@@ -466,6 +562,7 @@ async function init() {
     const top = Math.min(Math.max(e.clientY - bubbleGrabDY, 0), visibleBottom() - BUBBLE_SIZE);
     bubbleEl.style.left = `${left}px`;
     bubbleEl.style.top = `${top}px`;
+    setCloseZoneArmed(overCloseZone(bubbleEl));
     syncBubbleRect();
   });
 
@@ -473,6 +570,14 @@ async function init() {
     if (!bubbleDragging) return;
     bubbleDragging = false;
     bubbleEl.classList.remove('dragging');
+    if (bubblePressMoved && overCloseZone(bubbleEl)) {
+      closeZoneEl.classList.remove('visible');
+      setCloseZoneArmed(false);
+      invoke('close_app').catch(console.error);
+      return;
+    }
+    closeZoneEl.classList.remove('visible');
+    setCloseZoneArmed(false);
     syncBubbleRect(true);
     if (!bubblePressMoved) {
       openChat();
@@ -481,6 +586,8 @@ async function init() {
 
   window.addEventListener('pointercancel', () => {
     bubbleDragging = false;
+    closeZoneEl.classList.remove('visible');
+    setCloseZoneArmed(false);
   });
 
   // ── Chat Listeners ──
@@ -489,6 +596,7 @@ async function init() {
     chatDragging = true;
     chatPressMoved = false;
     chatClosePress = e.target === chatCloseBtn;
+    chatRespawnPress = e.target === chatRespawnBtn;
     const rect = chatEl.getBoundingClientRect();
     chatGrabDX = e.clientX - rect.left;
     chatGrabDY = e.clientY - rect.top;
@@ -507,8 +615,8 @@ async function init() {
       chatPressMoved = true;
       chatEl.classList.add('dragging');
     }
-    const left = Math.min(Math.max(e.clientX - chatGrabDX, 0), window.innerWidth - CHAT_W);
-    const top = Math.min(Math.max(e.clientY - chatGrabDY, 0), visibleBottom() - CHAT_H);
+    const left = Math.min(Math.max(e.clientX - chatGrabDX, 0), window.innerWidth - chatW);
+    const top = Math.min(Math.max(e.clientY - chatGrabDY, 0), visibleBottom() - chatH);
     chatEl.style.left = `${left}px`;
     chatEl.style.top = `${top}px`;
     syncChatRect();
@@ -522,12 +630,57 @@ async function init() {
     if (!chatPressMoved && chatClosePress) {
       chatClosePress = false;
       closeChat();
+    } else if (!chatPressMoved && chatRespawnPress) {
+      chatRespawnPress = false;
+      respawnPet();
     }
   });
 
   window.addEventListener('pointercancel', () => {
     chatDragging = false;
     chatClosePress = false;
+    chatRespawnPress = false;
+  });
+
+  // ── Chat Resize ──
+  window.addEventListener('pointermove', (e) => {
+    if (!chatResizing) return;
+    const dx = e.clientX - chatResizeStartX;
+    const dy = e.clientY - chatResizeStartY;
+    const west = chatResizeCorner.includes('w');
+    const north = chatResizeCorner.includes('n');
+
+    let w = chatStartW + (west ? -dx : dx);
+    let h = chatStartH + (north ? -dy : dy);
+
+    if (west) {
+      w = Math.min(Math.max(w, MIN_CHAT_W), chatStartRight);
+    } else {
+      w = Math.min(Math.max(w, MIN_CHAT_W), window.innerWidth - chatStartLeft);
+    }
+    if (north) {
+      h = Math.min(Math.max(h, MIN_CHAT_H), chatStartBottom);
+    } else {
+      h = Math.min(Math.max(h, MIN_CHAT_H), visibleBottom() - chatStartTop);
+    }
+
+    chatW = w;
+    chatH = h;
+    chatEl.style.left = `${west ? chatStartRight - w : chatStartLeft}px`;
+    chatEl.style.top = `${north ? chatStartBottom - h : chatStartTop}px`;
+    chatEl.style.width = `${w}px`;
+    chatEl.style.height = `${h}px`;
+    syncChatRect();
+  });
+
+  window.addEventListener('pointerup', () => {
+    if (!chatResizing) return;
+    chatResizing = false;
+    syncChatRect(true);
+  });
+
+  window.addEventListener('pointercancel', () => {
+    chatResizing = false;
   });
 
   chatSend.addEventListener('click', () => {
@@ -555,6 +708,7 @@ async function init() {
       const now = performance.now();
       if (now - lastBubbleSyncTime >= SYNC_INTERVAL_MS) {
         lastBubbleSyncTime = now;
+        positionCloseZone();
         syncBubbleRect();
       }
       return;

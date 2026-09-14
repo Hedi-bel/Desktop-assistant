@@ -13,8 +13,6 @@ use windows::Win32::Foundation::POINT;
 
 const POLL_INTERVAL_MS: u64 = 250;
 
-type PauseState = Arc<Mutex<bool>>;
-
 #[derive(Default, Clone, Copy, Debug)]
 struct CharRect {
     x: i32,
@@ -40,16 +38,16 @@ fn get_desktop_snapshot(state: tauri::State<SharedSnapshot>) -> Option<DesktopSn
 }
 
 #[tauri::command]
-fn show_context_menu(app: tauri::AppHandle, pause_state: tauri::State<PauseState>) -> Result<(), String> {
-    let paused = *pause_state.lock().unwrap();
-    let pause_label = if paused { "▶  Resume" } else { "⏸  Pause" };
+fn close_app(app: tauri::AppHandle) {
+    app.exit(0);
+}
 
-    let pause_item = MenuItem::with_id(&app, "pause", pause_label, true, None::<&str>)
-        .map_err(|e| e.to_string())?;
+#[tauri::command]
+fn show_context_menu(app: tauri::AppHandle) -> Result<(), String> {
     let minimize_item = MenuItem::with_id(&app, "minimize", "—  Minimize", true, None::<&str>)
         .map_err(|e| e.to_string())?;
 
-    let menu = Menu::with_items(&app, &[&pause_item, &minimize_item])
+    let menu = Menu::with_items(&app, &[&minimize_item])
         .map_err(|e| e.to_string())?;
 
     if let Some(main_win) = app.get_webview_window("main") {
@@ -163,16 +161,14 @@ async fn chat_message(messages: Vec<ChatMsgIn>) -> Result<String, String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let pause_state: PauseState = Arc::new(Mutex::new(false));
     let shared_rect: SharedRect = Arc::new(Mutex::new(None));
     let shared_snapshot: SharedSnapshot = Arc::new(Mutex::new(None));
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .manage(pause_state)
         .manage(shared_rect.clone())
         .manage(shared_snapshot.clone())
-        .invoke_handler(tauri::generate_handler![show_context_menu, update_character_rect, get_desktop_snapshot, chat_message])
+        .invoke_handler(tauri::generate_handler![show_context_menu, update_character_rect, get_desktop_snapshot, chat_message, close_app])
         .setup(|app| {
             let window = app.get_webview_window("main").expect("no main window");
             
@@ -186,14 +182,8 @@ pub fn run() {
             let _ = window.set_ignore_cursor_events(true);
             
             let app_handle_menu = app.handle().clone();
-            let pause_state_clone = app.state::<PauseState>().inner().clone();
             app.on_menu_event(move |_app, event| {
                 match event.id().as_ref() {
-                    "pause" => {
-                        let mut paused = pause_state_clone.lock().unwrap();
-                        *paused = !*paused;
-                        let _ = app_handle_menu.emit("pet-pause-toggle", ());
-                    }
                     "close" => {
                         app_handle_menu.exit(0);
                     }

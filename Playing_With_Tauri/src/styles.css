@@ -17,8 +17,8 @@ canvas {
 
 .bubble {
   position: fixed;
-  width: 64px;
-  height: 64px;
+  width: 56px;
+  height: 56px;
   border-radius: 50%;
   overflow: hidden;
   border: 2px solid #ffffff;
@@ -50,8 +50,8 @@ canvas {
 
 .chat {
   position: fixed;
-  width: 340px;
-  height: 480px;
+  width: 320px;
+  height: 400px;
   display: none;
   flex-direction: column;
   background: #ffffff;
@@ -121,6 +121,33 @@ canvas {
 .chat-close:hover {
   background: rgba(0, 0, 0, 0.08);
   color: #1a1a1a;
+}
+
+.chat-respawn {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  padding: 4px 2px 4px 8px;
+  border-radius: 6px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.chat-respawn img {
+  width: 20px;
+  height: 20px;
+  display: block;
+  pointer-events: none;
+}
+
+.chat-respawn:hover {
+  background: rgba(0, 0, 0, 0.08);
+}
+
+.chat-respawn:hover img {
+  filter: brightness(0) saturate(100%);
 }
 
 .chat-body {
@@ -232,4 +259,79 @@ canvas {
 .chat-send:disabled {
   background: #b8d9f5;
   cursor: default;
+}
+
+.chat-resize {
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  touch-action: none;
+  z-index: 5;
+}
+
+.chat-resize.se {
+  right: 0;
+  bottom: 0;
+  cursor: nwse-resize;
+}
+
+.chat-resize.sw {
+  left: 0;
+  bottom: 0;
+  cursor: nesw-resize;
+}
+
+.chat-resize.ne {
+  right: 0;
+  top: 0;
+  cursor: nesw-resize;
+}
+
+.chat-resize.nw {
+  left: 0;
+  top: 0;
+  cursor: nwse-resize;
+}
+
+.chat-resize.se::after {
+  content: '';
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  width: 7px;
+  height: 7px;
+  border-right: 2px solid rgba(0, 0, 0, 0.35);
+  border-bottom: 2px solid rgba(0, 0, 0, 0.35);
+  border-bottom-right-radius: 2px;
+}
+
+.close-zone {
+  position: fixed;
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: #e53935;
+  border: 2px solid #ffffff;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+  color: #ffffff;
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 90;
+  user-select: none;
+  pointer-events: none;
+  transition: transform 0.12s ease, background 0.12s ease;
+}
+
+.close-zone.visible {
+  display: flex;
+}
+
+.close-zone.armed {
+  transform: scale(1.2);
+  background: #ff1744;
+  box-shadow: 0 4px 20px rgba(255, 23, 68, 0.6);
 }
