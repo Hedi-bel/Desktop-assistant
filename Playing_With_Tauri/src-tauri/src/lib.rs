@@ -165,7 +165,6 @@ pub fn run() {
     let shared_snapshot: SharedSnapshot = Arc::new(Mutex::new(None));
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
         .manage(shared_rect.clone())
         .manage(shared_snapshot.clone())
         .invoke_handler(tauri::generate_handler![show_context_menu, update_character_rect, get_desktop_snapshot, chat_message, close_app])
@@ -184,9 +183,6 @@ pub fn run() {
             let app_handle_menu = app.handle().clone();
             app.on_menu_event(move |_app, event| {
                 match event.id().as_ref() {
-                    "close" => {
-                        app_handle_menu.exit(0);
-                    }
                     "minimize" => {
                         let _ = app_handle_menu.emit("pet-bubble-toggle", ());
                     }
