@@ -1,4 +1,4 @@
-import { Application, AnimatedSprite, Container, Rectangle } from 'pixi.js';
+import { Application, AnimatedSprite, Container, Rectangle, Ticker } from 'pixi.js';
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { DesktopSnapshot, buildPlatforms } from './types';
@@ -9,9 +9,10 @@ import {
   refreshPlatformReference,
   CHAR_WIDTH,
   CHAR_HEIGHT,
+  SLEEP_AFTER_MS,
 } from './physics';
 import type { CharacterState } from './physics';
-import { STATE_CLIPS, CHAR_SCALE, loadCharacterClips } from './sprites';
+import { STATE_CLIPS, CHAR_SCALE, clipScale, loadCharacterClips } from './sprites';
 import type { CharacterClips } from './sprites';
 import { trimReply, CHAT_HISTORY_LIMIT } from './chat';
 import type { ChatMsg } from './chat';
@@ -40,6 +41,7 @@ let dragHistory: { x: number; y: number; t: number }[] = [];
 // ── Bubble Mode ──
 const BUBBLE_SIZE = 56;
 const CLOSE_ZONE_SIZE = 56;
+const LOVE_MS = (STATE_CLIPS.love.frames / STATE_CLIPS.love.fps) * 1000;
 let closeZoneEl: HTMLDivElement;
 let closeZoneArmed = false;
 let bubbleMode = false;
@@ -185,6 +187,14 @@ function closeChat(): void {
   syncBubbleRect(true);
 }
 
+function wakePet(): void {
+  character.dozeTimer = SLEEP_AFTER_MS;
+  if (character.state === 'sleep') {
+    character.state = 'idle';
+    character.idleTimer = 800 + Math.random() * 1200;
+  }
+}
+
 function respawnPet(): void {
   bubbleMode = false;
   petVisible = true;
@@ -196,7 +206,6 @@ function respawnPet(): void {
     chatMode = false;
     chatEl.classList.remove('visible');
   }
-  character.paused = false;
   chibiSprite.play();
   character.vx = 0;
   character.vy = 0;
@@ -319,10 +328,12 @@ async function init() {
     resizeTo: window,
     backgroundAlpha: 0,
     antialias: true,
+    autoStart: false,
   });
   
   const container = document.getElementById('app')!;
   container.appendChild(app.canvas);
+  app.canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
   // ── Bubble Element ──
   bubbleEl = document.createElement('div');
@@ -416,6 +427,7 @@ async function init() {
   charContainer.on('pointerdown', (e) => {
     // Left button only
     if (e.button === 0) {
+      wakePet();
       dragging = true;
       pressMoved = false;
       const mx = e.global.x;
@@ -429,6 +441,13 @@ async function init() {
         app.canvas.setPointerCapture(e.pointerId);
       } catch {
         // Pointer capture unavailable; drag still works while inside the window
+      }
+    } else if (e.button === 2) {
+      if (!dragging && character.state !== 'fall' && character.state !== 'love') {
+        character.lovePrev = character.state;
+        character.loveTimer = LOVE_MS;
+        character.dozeTimer = SLEEP_AFTER_MS;
+        character.state = 'love';
       }
     }
   });
@@ -695,7 +714,11 @@ async function init() {
   });
 
   // ── Render Loop ──
-  app.ticker.add((ticker) => {
+  const gameTicker = new Ticker();
+  let forceRender = true;
+  let lastRenderedFrame = -1;
+
+  gameTicker.add((ticker) => {
     if (chatMode) {
       const now = performance.now();
       if (now - lastChatSyncTime >= SYNC_INTERVAL_MS) {
@@ -720,6 +743,7 @@ async function init() {
     const prevState = character.state;
     const prevX = character.x;
     const prevY = character.y;
+    const prevFacing = character.facing;
     
     if (dragging) {
       character.state = 'fall';
@@ -732,9 +756,7 @@ async function init() {
     character.x = Math.min(Math.max(character.x, 0), window.innerWidth - CHAR_WIDTH);
     
     setStateAnimation(character.state);
-    if (character.paused) {
-      chibiSprite.stop();
-    } else if (!chibiSprite.playing) {
+    if (!chibiSprite.playing) {
       chibiSprite.play();
     }
     
@@ -752,10 +774,11 @@ async function init() {
       vis.scale.y = 1;
     }
 
+    const stateChanged = character.state !== prevState;
+    const movedEnough = Math.abs(character.x - prevX) > 0.5 || Math.abs(character.y - prevY) > 0.5;
+
     // ── Sync Strategy ──
     if ('__TAURI_INTERNALS__' in window) {
-      const stateChanged = character.state !== prevState;
-      const movedEnough = Math.abs(character.x - prevX) > 0.5 || Math.abs(character.y - prevY) > 0.5;
       const now = performance.now();
       const periodicSyncDue = movedEnough && (now - lastSyncTime >= SYNC_INTERVAL_MS);
 
@@ -764,7 +787,24 @@ async function init() {
         syncCharacterRect(character.x, character.y).catch(() => {});
       }
     }
+
+    // ── Throttled Render ──
+    const needsRender =
+      forceRender ||
+      stateChanged ||
+      movedEnough ||
+      character.facing !== prevFacing ||
+      character.state === 'land' ||
+      chibiSprite.currentFrame !== lastRenderedFrame;
+
+    if (needsRender) {
+      forceRender = false;
+      lastRenderedFrame = chibiSprite.currentFrame;
+      app.render();
+    }
   });
+
+  gameTicker.start();
 }
 
 function applyClip(sprite: AnimatedSprite, state: CharacterState['state']): void {
@@ -772,6 +812,7 @@ function applyClip(sprite: AnimatedSprite, state: CharacterState['state']): void
   sprite.textures = clips[state];
   sprite.animationSpeed = clip.fps / 60;
   sprite.loop = clip.loop;
+  sprite.scale.set(CHAR_SCALE * clipScale(state));
 }
 
 function setStateAnimation(state: CharacterState['state']): void {

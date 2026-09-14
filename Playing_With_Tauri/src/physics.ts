@@ -12,7 +12,10 @@ const IDLE_MAX_MS = 2500;      // maximum idle time before walking
 const MAX_FALL_SPEED = 700;    // px/s terminal fall speed
 const AIR_DRAG = 2.5;          // 1/s damping while airborne
 
-export type PetState = 'idle' | 'walk' | 'fall' | 'land';
+export type PetState = 'idle' | 'walk' | 'fall' | 'land' | 'sleep' | 'love';
+
+/** How long an un-interacted pet rests before falling asleep (ms). */
+export const SLEEP_AFTER_MS = 20000;
 
 export interface CharacterState {
   x: number;
@@ -25,8 +28,12 @@ export interface CharacterState {
   facing: 1 | -1;             // 1 = right, -1 = left
   idleTimer: number;           // ms remaining in idle state
   landTimer: number;           // ms remaining in land animation
-  /** When true, physics updates are skipped (except gravity while falling). */
-  paused: boolean;
+  /** ms remaining before an idle pet falls asleep. */
+  dozeTimer: number;
+  /** ms remaining in the love animation (right-click). */
+  loveTimer: number;
+  /** Grounded state to return to after the love animation. */
+  lovePrev: PetState;
 }
 
 /** Create initial character state — starts falling from top-center */
@@ -42,7 +49,9 @@ export function createCharacter(screenWidth: number): CharacterState {
     facing: 1,
     idleTimer: 0,
     landTimer: 0,
-    paused: false,
+    dozeTimer: SLEEP_AFTER_MS,
+    loveTimer: 0,
+    lovePrev: 'idle',
   };
 }
 
@@ -154,32 +163,10 @@ export function updatePhysics(
   dt = Math.min(dt, 0.1);
   const dtMs = dt * 1000;
 
-  // ── Pause guard ──
-  // When paused and grounded, skip all AI/animation updates entirely.
-  // When paused but mid-air (fall), still apply gravity so the pet lands
-  // naturally rather than floating — once it lands the pause keeps it still.
-  if (char.paused) {
-    if (char.state === 'fall') {
-      const prevY = char.y;
-      char.vy += GRAVITY * dt;
-      char.y += char.vy * dt;
-      const landing = findLandingPlatform(char, prevY, platforms);
-      if (landing) {
-        char.y = landing.y - CHAR_HEIGHT;
-        char.vy = 0;
-        char.currentPlatform = landing;
-        // Settle into idle so resuming from a paused-while-falling state works cleanly
-        char.state = 'idle';
-        char.idleTimer = 9999999; // effectively infinite until unpaused
-      }
-      const floor = worldFloor(platforms);
-      if (char.y > screenHeight + 100 || (floor > -Infinity && char.y + CHAR_HEIGHT > floor)) {
-        respawnCharacter(char, platforms);
-      }
-    }
-    // For idle / walk / land: do nothing — pet is frozen.
-    return;
-  }
+  // The sleep clock counts wall-clock time while unoccupied (any grounded
+  // movement); it is only consumed by the idle state, which transitions to
+  // sleep when it runs out.
+  char.dozeTimer -= dtMs;
 
   switch (char.state) {
     case 'idle': {
@@ -199,11 +186,33 @@ export function updatePhysics(
       }
       
       char.idleTimer -= dtMs;
+      if (char.dozeTimer <= 0) {
+        char.state = 'sleep';
+        break;
+      }
       if (char.idleTimer <= 0) {
         // Pick a new walk target
         char.targetX = randomTargetOnPlatform(char.currentPlatform);
         char.facing = char.targetX > char.x ? 1 : -1;
         char.state = 'walk';
+      }
+      break;
+    }
+    
+    case 'sleep': {
+      // Validate current platform still exists
+      if (!char.currentPlatform || !platformStillExists(char.currentPlatform, platforms)) {
+        char.currentPlatform = null;
+        char.state = 'fall';
+        char.vy = 0;
+        break;
+      }
+      // Check we're still on the platform horizontally
+      if (!isOnPlatform(char, char.currentPlatform)) {
+        char.currentPlatform = null;
+        char.state = 'fall';
+        char.vy = 0;
+        break;
       }
       break;
     }
@@ -288,6 +297,16 @@ export function updatePhysics(
       if (char.landTimer <= 0) {
         char.state = 'idle';
         char.idleTimer = randomIdleTime();
+      }
+      break;
+    }
+
+    case 'love': {
+      char.loveTimer -= dtMs;
+      if (char.loveTimer <= 0) {
+        char.state = char.lovePrev;
+        char.lovePrev = 'idle';
+        if (char.state === 'idle') char.idleTimer = randomIdleTime();
       }
       break;
     }
